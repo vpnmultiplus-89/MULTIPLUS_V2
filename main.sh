@@ -748,7 +748,7 @@ print_install "Restarting  All Packet"
 /etc/init.d/openvpn restart
 /etc/init.d/ssh restart
 /etc/init.d/dropbear restart
-/etc/init.d/fail2ban restart
+if command -v systemctl >/dev/null 2>&1; then systemctl restart fail2ban >/dev/null 2>&1 || true; elif [ -x /etc/init.d/fail2ban ]; then /etc/init.d/fail2ban restart >/dev/null 2>&1 || true; else echo "[INFO] fail2ban tidak terpasang, skip."; fi
 /etc/init.d/vnstat restart
 systemctl restart haproxy
 /etc/init.d/cron restart
