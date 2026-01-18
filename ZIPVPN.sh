@@ -21,7 +21,7 @@ MAINT_TIMER="zivpn-maint.timer"
 echo "==> Updating packages..."
 apt-get update -y >/dev/null
 apt-get upgrade -y >/dev/null
-apt-get install -y python3-venv python3-pip openssl ufw curl jq wget zip unzip iptables iptables-persistent netfilter-persistent >/dev/null
+apt-get install -y python3-venv python3-pip openssl ufw curl jq wget zip unzip iptables >/dev/null
 
 echo "==> Installing ZIVPN binary..."
 systemctl stop ${ZIVPN_SVC} 2>/dev/null || true
@@ -63,14 +63,14 @@ EOF
 systemctl daemon-reload
 systemctl enable --now ${ZIVPN_SVC}
 
-IFC=$(ip -4 route ls | awk '/default/ {print $5; exit}')
-iptables -t nat -A PREROUTING -i "$IFC" -p udp --dport 6000:19999 -j DNAT --to-destination :5667
+echo "==> Setting up NAT + Firewall..."
+IFC=$(ip -4 route ls | awk '/default/ {print $5; exit}' || true)
+IFC=${IFC:-eth0}
+iptables -t nat -C PREROUTING -i "$IFC" -p udp --dport 6000:19999 -j REDIRECT --to-ports 5667 2>/dev/null || \
+iptables -t nat -A PREROUTING -i "$IFC" -p udp --dport 6000:19999 -j REDIRECT --to-ports 5667
 
-# Persist iptables NAT rules across reboot
-netfilter-persistent save >/dev/null 2>&1 || true
-systemctl enable --now netfilter-persistent >/dev/null 2>&1 || true
-ufw allow 5667/udp || true
-ufw allow 8088/tcp || true
+ufw allow 5667/udp >/dev/null 2>&1 || true
+ufw allow 8088/tcp >/dev/null 2>&1 || true
 
 echo "==> Setting up Web Panel..."
 mkdir -p "${ADMIN_DIR}"
@@ -171,6 +171,9 @@ migrate_db()
 def now_utc():
     return datetime.utcnow()
 
+def now_utc_str():
+    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
 def now_local_str():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -209,7 +212,7 @@ def _reseller_active(expires_at_text):
 
 def sync_config():
     with db() as con:
-        pw=[r[0] for r in con.execute("SELECT DISTINCT password FROM users WHERE expires_at > ?", (now_utc().isoformat(),))]
+        pw=[r[0] for r in con.execute("SELECT DISTINCT password FROM users WHERE expires_at > ?", (now_utc_str(),))]
     if not pw:
         pw=["zi"]
     cfg={}
@@ -228,7 +231,7 @@ def sync_config():
 
 def purge_expired_users():
     with db() as con:
-        con.execute("DELETE FROM users WHERE expires_at <= ?", (now_utc().isoformat(),))
+        con.execute("DELETE FROM users WHERE expires_at <= ?", (now_utc_str(),))
     sync_config()
 
 def login_required(role=None):
@@ -270,7 +273,7 @@ def user_rows_for_admin():
                                 FROM users u
                                 LEFT JOIN resellers r ON r.id=u.reseller_id
                                 ORDER BY u.id DESC"""):
-            expired = r["expires_at"] <= now_utc().isoformat()
+            dt=_parse_dt(r["expires_at"]); expired = (dt is not None and dt <= now_utc())
             online = (not expired) and (r["password"].lower() in log)
             left=None
             try:
@@ -294,7 +297,7 @@ def user_rows_for_reseller(reseller_id):
     out=[]
     with db() as con:
         for r in con.execute("SELECT * FROM users WHERE reseller_id=? ORDER BY id DESC",(reseller_id,)):
-            expired = r["expires_at"] <= now_utc().isoformat()
+            dt=_parse_dt(r["expires_at"]); expired = (dt is not None and dt <= now_utc())
             online = (not expired) and (r["password"].lower() in log)
             left=None
             try:
@@ -566,6 +569,27 @@ transform: rotate(12deg); pointer-events:none;}
 .qnow{background: linear-gradient(90deg, rgba(244,63,94,.80), rgba(236,72,153,.80));}
 .qclr{background: linear-gradient(90deg, rgba(100,116,139,.75), rgba(30,41,59,.75));}
 
+/* Flatpickr LIGHT THEME */
+.flatpickr-calendar{
+  background: rgba(255,255,255,.92) !important;
+  color:#0f172a !important;
+  border:1px solid rgba(15,23,42,.18) !important;
+  box-shadow:0 18px 60px rgba(0,0,0,.35) !important;
+}
+.flatpickr-months .flatpickr-month,
+.flatpickr-current-month,
+.flatpickr-weekday,
+.flatpickr-day { color:#0f172a !important; }
+.flatpickr-day:hover{ background: rgba(16,185,129,.15) !important; }
+.flatpickr-day.selected,
+.flatpickr-day.startRange,
+.flatpickr-day.endRange{
+  background:#10b981 !important; border-color:#10b981 !important; color:white !important;
+}
+.flatpickr-time input{ color:#0f172a !important; }
+.flatpickr-confirm{
+  background:#10b981 !important; color:#fff !important; border-radius:10px !important;
+}
 </style>
 '''
 
@@ -610,10 +634,45 @@ async function refreshSYS(){
   }catch(e){}
 }
 
+function initPicker(inputId){
+  const input=document.getElementById(inputId);
+  if(!input) return;
+  let prevVal="";
+  function addCancel(fp){
+    const okBtn = fp.calendarContainer.querySelector(".flatpickr-confirm");
+    if(!okBtn) return;
+    const cancel=document.createElement("button");
+    cancel.type="button";
+    cancel.className="flatpickr-confirm";
+    cancel.style.marginLeft="8px";
+    cancel.textContent="Batal";
+    cancel.addEventListener("click", ()=>{
+      fp.setDate(prevVal, true);
+      fp.close();
+    });
+    okBtn.parentNode.appendChild(cancel);
+  }
+  flatpickr("#"+inputId, {
+    disableMobile:true,
+    enableTime:true,
+    enableSeconds:true,
+    dateFormat:"Y-m-d H:i:S",
+    time_24hr:true,
+    allowInput:true,
+    clickOpens:true,
+    plugins: [new confirmDatePlugin({ confirmText:"OK", showAlways:true })],
+    onOpen: (selectedDates, dateStr, fp)=>{ prevVal = fp.input.value || ""; },
+    onReady: (selectedDates, dateStr, fp)=>{ addCancel(fp); }
+  });
+}
+
 window.addEventListener('load', ()=>{
   refreshBW(); refreshSYS();
   setInterval(refreshBW, 1000);
   setInterval(refreshSYS, 2000);
+
+  initPicker("expires_at");
+  initPicker("reseller_expires_at");
 
   const setExp=(mins)=>{
     const el=document.getElementById('expires_at');
@@ -667,6 +726,11 @@ DASH_TPL = r'''<!doctype html>
 <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>{{panel_name}} - Admin</title>
 <script src="https://cdn.tailwindcss.com"></script>
+
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
+<script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+<script src="https://cdn.jsdelivr.net/npm/flatpickr/dist/plugins/confirmDate/confirmDate.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/plugins/confirmDate/confirmDate.css">
 
 ''' + COMMON_STYLE + COMMON_JS + r'''
 </head>
@@ -723,7 +787,7 @@ DASH_TPL = r'''<!doctype html>
         <button type="button" id="bclear" class="btn-gloss qbtn qclr rounded-2xl py-2 text-sm">Clear</button>
       </div>
 
-      <input id="expires_at" name="expires_at" value="{{default_exp}}" placeholder="YYYY-MM-DD HH:MM:SS" readonly
+      <input id="expires_at" name="expires_at" value="{{default_exp}}" placeholder="YYYY-MM-DD HH:MM:SS"
         class="w-full rounded-2xl p-3 bg-white/10 border border-white/10 outline-none placeholder:text-white/40">
 
       <select name="reseller_id" class="w-full rounded-2xl p-3 bg-white/10 border border-white/10 outline-none">
@@ -744,7 +808,7 @@ DASH_TPL = r'''<!doctype html>
       <input name="username" placeholder="Username reseller" class="w-full rounded-2xl p-3 bg-white/10 border border-white/10 outline-none placeholder:text-white/40">
       <input name="password" placeholder="Password reseller (kosong = auto)" class="w-full rounded-2xl p-3 bg-white/10 border border-white/10 outline-none placeholder:text-white/40">
       <input name="max_users" placeholder="Max users reseller (0 = unlimited)" class="w-full rounded-2xl p-3 bg-white/10 border border-white/10 outline-none placeholder:text-white/40">
-      <input id="reseller_expires_at" name="expires_at" placeholder="Expired reseller (kosong = unlimited) YYYY-MM-DD HH:MM:SS" readonly
+      <input id="reseller_expires_at" name="expires_at" placeholder="Expired reseller (kosong = unlimited) YYYY-MM-DD HH:MM:SS"
         class="w-full rounded-2xl p-3 bg-white/10 border border-white/10 outline-none placeholder:text-white/40">
       <button class="w-full btn-gloss rounded-2xl py-3 font-semibold bg-gradient-to-r from-sky-500 via-blue-600 to-indigo-500 hover:brightness-110">Buat Reseller</button>
       <div class="tiny muted">Daftar reseller WA: <b class="text-white">{{wa}}</b></div>
@@ -796,7 +860,7 @@ DASH_TPL = r'''<!doctype html>
                     class="w-full rounded-2xl p-3 bg-white/10 border border-white/10 outline-none placeholder:text-white/40">
                   <input name="max_users" value="{{rr['max_users']}}" placeholder="Max users reseller (0=unlimited)"
                     class="w-full rounded-2xl p-3 bg-white/10 border border-white/10 outline-none placeholder:text-white/40">
-                  <input name="expires_at" value="{{rr['expires_at']}}" placeholder="Expired reseller (kosong = unlimited) YYYY-MM-DD HH:MM:SS" readonly
+                  <input name="expires_at" value="{{rr['expires_at']}}" placeholder="Expired reseller (kosong = unlimited) YYYY-MM-DD HH:MM:SS"
                     class="w-full rounded-2xl p-3 bg-white/10 border border-white/10 outline-none placeholder:text-white/40">
                   <button class="w-full btn-gloss rounded-2xl py-3 font-semibold bg-gradient-to-r from-emerald-500 to-teal-500 hover:brightness-110">Save Reseller</button>
                 </form>
@@ -854,7 +918,7 @@ DASH_TPL = r'''<!doctype html>
             <form method="post" action="/admin/user/update/{{r['id']}}" class="space-y-2">
               <input name="password" value="{{r['password']}}" placeholder="Password"
                 class="w-full rounded-2xl p-3 bg-white/10 border border-white/10 outline-none placeholder:text-white/40">
-              <input name="expires_at" value="{{r['expires_at']}}" placeholder="YYYY-MM-DD HH:MM:SS" readonly
+              <input name="expires_at" value="{{r['expires_at']}}" placeholder="YYYY-MM-DD HH:MM:SS"
                 class="w-full rounded-2xl p-3 bg-white/10 border border-white/10 outline-none placeholder:text-white/40">
               <select name="reseller_id" class="w-full rounded-2xl p-3 bg-white/10 border border-white/10 outline-none">
                 <option value="">Owner: Admin</option>
@@ -878,6 +942,11 @@ RESELLER_DASH_TPL = r'''<!doctype html>
 <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>{{panel_name}} - Reseller</title>
 <script src="https://cdn.tailwindcss.com"></script>
+
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
+<script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+<script src="https://cdn.jsdelivr.net/npm/flatpickr/dist/plugins/confirmDate/confirmDate.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/plugins/confirmDate/confirmDate.css">
 
 ''' + COMMON_STYLE + COMMON_JS + r'''
 </head>
@@ -920,7 +989,7 @@ RESELLER_DASH_TPL = r'''<!doctype html>
         <button type="button" id="bclear" class="btn-gloss qbtn qclr rounded-2xl py-2 text-sm">Clear</button>
       </div>
 
-      <input id="expires_at" name="expires_at" value="{{default_exp}}" placeholder="YYYY-MM-DD HH:MM:SS" readonly
+      <input id="expires_at" name="expires_at" value="{{default_exp}}" placeholder="YYYY-MM-DD HH:MM:SS"
         class="w-full rounded-2xl p-3 bg-white/10 border border-white/10 outline-none placeholder:text-white/40">
 
       <button class="w-full btn-gloss rounded-2xl py-3 font-semibold bg-gradient-to-r from-sky-500 via-blue-600 to-indigo-500 hover:brightness-110">Create User</button>
@@ -1269,7 +1338,7 @@ CFG=os.getenv("ZIVPN_CONFIG","/etc/zivpn/config.json")
 SVC=os.getenv("ZIVPN_SERVICE","zivpn.service")
 
 def now_iso():
-    return datetime.utcnow().isoformat()
+    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
 def sync():
     with sqlite3.connect(DB) as con:
@@ -1349,6 +1418,6 @@ echo
 echo "INSTALL COMPLETE"
 echo "Open Admin    : http://${IP}:${PANEL_PORT}/login"
 echo "Open Reseller : http://${IP}:${PANEL_PORT}/reseller/login"
-echo "UDP Port      : 5667 (NAT 6000-19999 -> 1433)"
+echo "UDP Port      : 5667 (NAT 6000-19999 -> 5667)"
 echo "Auto purge expired users: every 10 minutes"
 echo "======================================"
